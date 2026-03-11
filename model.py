@@ -1,41 +1,38 @@
 # model.py
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 # =========================================================
-# 改进模型：多尺度卷积 MultiScale1DCNN
-# 功能：
-#   - 并行三尺度卷积（16 / 32 / 64）
-#   - BN + Dropout 防止过拟合
-#   - GlobalAveragePooling 提升跨负载泛化
-# 输入：  [batch, 1, 1024]
-# 输出：  [batch, num_classes]
+# 改进模型：Multi-Scale 1D-CNN + 分级框架（Multi-Task）
+# 主任务：故障类型识别（Fault Classification）
+# 辅任务：危险等级预测（Severity Grading）
+#
+# 输入：  [B, 1, 1024]
+# 输出：
+#   - fault_logits:    [B, num_fault_classes]
+#   - severity_logits: [B, num_severity_classes]
 # =========================================================
 class MultiScale1DCNN(nn.Module):
-    """
-    改进版 1D-CNN：
-        1) 第一卷积块加入三支路多尺度卷积
-        2) 卷积层结构：Conv → BN → Tanh → Dropout
-        3) 使用全局平均池化替代 flatten
-    """
 
-    def __init__(self,
-                 num_classes: int = 4,
-                 input_channels: int = 1,
-                 branch_out_channels: int = 32):
+    def __init__(
+        self,
+        num_fault_classes: int = 4,
+        num_severity_classes: int = 3,   # === NEW === 危险等级数量
+        input_channels: int = 1,
+        branch_out_channels: int = 32
+    ):
         super().__init__()
 
-        # ------------------------------
-        # 多尺度卷积块：三支路并行
-        # ------------------------------
+        # -------------------------------------------------
+        # 多尺度卷积：三支路并行
+        # -------------------------------------------------
         self.branch1 = nn.Sequential(
             nn.Conv1d(input_channels, branch_out_channels,
                       kernel_size=16, padding=16 // 2),
             nn.BatchNorm1d(branch_out_channels),
             nn.Tanh(),
-            nn.MaxPool1d(kernel_size=2),
+            nn.MaxPool1d(2),
             nn.Dropout(0.30)
         )
 
@@ -44,7 +41,7 @@ class MultiScale1DCNN(nn.Module):
                       kernel_size=32, padding=32 // 2),
             nn.BatchNorm1d(branch_out_channels),
             nn.Tanh(),
-            nn.MaxPool1d(kernel_size=2),
+            nn.MaxPool1d(2),
             nn.Dropout(0.30)
         )
 
@@ -53,21 +50,20 @@ class MultiScale1DCNN(nn.Module):
                       kernel_size=64, padding=64 // 2),
             nn.BatchNorm1d(branch_out_channels),
             nn.Tanh(),
-            nn.MaxPool1d(kernel_size=2),
+            nn.MaxPool1d(2),
             nn.Dropout(0.30)
         )
 
-        # 多尺度输出通道
         multi_out = branch_out_channels * 3
 
-        # ------------------------------
-        # 后续卷积块（保持与 baseline 类似，但加入 BN + Dropout）
-        # ------------------------------
+        # -------------------------------------------------
+        # 共享卷积主干（Backbone）
+        # -------------------------------------------------
         self.conv_block2 = nn.Sequential(
             nn.Conv1d(multi_out, 64, kernel_size=8, padding=8 // 2),
             nn.BatchNorm1d(64),
             nn.Tanh(),
-            nn.MaxPool1d(kernel_size=2),
+            nn.MaxPool1d(2),
             nn.Dropout(0.25)
         )
 
@@ -75,7 +71,7 @@ class MultiScale1DCNN(nn.Module):
             nn.Conv1d(64, 32, kernel_size=4, padding=4 // 2),
             nn.BatchNorm1d(32),
             nn.Tanh(),
-            nn.MaxPool1d(kernel_size=2),
+            nn.MaxPool1d(2),
             nn.Dropout(0.25)
         )
 
@@ -83,35 +79,41 @@ class MultiScale1DCNN(nn.Module):
             nn.Conv1d(32, 16, kernel_size=4, padding=4 // 2),
             nn.BatchNorm1d(16),
             nn.Tanh(),
-            nn.MaxPool1d(kernel_size=2),
+            nn.MaxPool1d(2),
             nn.Dropout(0.25)
         )
 
-        # ------------------------------
-        # 全局平均池化 + 分类层
-        # ------------------------------
-        self.gap = nn.AdaptiveAvgPool1d(1)  # 输出 [B, C, 1]
-        self.classifier = nn.Linear(16, num_classes)
+        # -------------------------------------------------
+        # 全局平均池化
+        # -------------------------------------------------
+        self.gap = nn.AdaptiveAvgPool1d(1)
+
+        # -------------------------------------------------
+        # 多任务输出头（Heads）
+        # -------------------------------------------------
+        self.fault_head = nn.Linear(16, num_fault_classes)
+        self.severity_head = nn.Linear(16, num_severity_classes)  # === NEW ===
 
     def forward(self, x):
         # x: [B, 1, 1024]
 
-        # 多尺度三支路
+        # ---------- Multi-scale ----------
         b1 = self.branch1(x)
         b2 = self.branch2(x)
         b3 = self.branch3(x)
 
-        # 通道拼接
-        x = torch.cat([b1, b2, b3], dim=1)  # [B, 32*3, L]
+        x = torch.cat([b1, b2, b3], dim=1)
 
-        # 后续卷积
+        # ---------- Shared Backbone ----------
         x = self.conv_block2(x)
         x = self.conv_block3(x)
         x = self.conv_block4(x)
 
-        # GAP
+        # ---------- GAP ----------
         x = self.gap(x).squeeze(-1)  # [B, 16]
 
-        # 分类
-        x = self.classifier(x)       # [B, num_classes]
-        return x
+        # ---------- Multi-task outputs ----------
+        fault_logits = self.fault_head(x)
+        severity_logits = self.severity_head(x)
+
+        return fault_logits, severity_logits

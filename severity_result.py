@@ -1,4 +1,3 @@
-# severity_result.py
 import os
 import numpy as np
 import torch
@@ -51,6 +50,7 @@ def evaluate_severity(model, loader):
             _, sev_out = model(batch_x)
             sev_pred = torch.argmax(sev_out, dim=1)
 
+            # 仅对非 Normal 样本统计 Severity
             for i in range(len(batch_fault)):
                 if batch_fault[i].item() != 0:
                     all_preds.append(sev_pred[i].item())
@@ -60,31 +60,44 @@ def evaluate_severity(model, loader):
 
 
 # --------------------------------------------------------
-# 绘制危险等级混淆矩阵
+# 绘制危险等级混淆矩阵（浅蓝 + 白色）
 # --------------------------------------------------------
 def plot_severity_confusion_matrix(y_true, y_pred):
     class_names = ["Low", "Medium", "High"]
     cm = confusion_matrix(y_true, y_pred)
 
     plt.figure(figsize=(5, 4))
-    plt.imshow(cm)
+    plt.imshow(
+        cm,
+        interpolation="nearest",
+        cmap=plt.cm.Blues,  # 浅蓝色
+        vmin=0              # 0 显示为白色
+    )
     plt.title("Severity Confusion Matrix")
-    plt.colorbar()
+    plt.colorbar(shrink=0.8)
 
     ticks = np.arange(len(class_names))
     plt.xticks(ticks, class_names)
     plt.yticks(ticks, class_names)
 
+    # 自动切换文字颜色
+    thresh = cm.max() / 2.0
     for i in range(cm.shape[0]):
         for j in range(cm.shape[1]):
-            plt.text(j, i, cm[i, j],
-                     ha="center", va="center")
+            plt.text(
+                j, i, cm[i, j],
+                ha="center", va="center",
+                color="white" if cm[i, j] > thresh else "black"
+            )
 
     plt.xlabel("Predicted Severity")
     plt.ylabel("True Severity")
     plt.tight_layout()
 
-    plt.savefig(os.path.join(RESULT_DIR, "severity_confusion_matrix.png"))
+    plt.savefig(
+        os.path.join(RESULT_DIR, "severity_confusion_matrix.png"),
+        dpi=300
+    )
     plt.close()
 
 

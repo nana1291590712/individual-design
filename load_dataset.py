@@ -35,6 +35,32 @@ def parse_label(filename):
 
 
 # ---------------------------------------------------------
+# === [NEW] 从文件名解析故障等级（Severity / Level）
+# ---------------------------------------------------------
+def parse_severity(filename):
+    """
+    故障分级规则（基于 CWRU 常见命名）：
+        Normal           -> level 0
+        0.007 inch fault -> level 1 (Mild)
+        0.014 inch fault -> level 2 (Moderate)
+        0.021 inch fault -> level 3 (Severe)
+    """
+    name = filename.lower()
+
+    if "normal" in name:
+        return 0
+    elif "0.007" in name:
+        return 1
+    elif "0.014" in name:
+        return 2
+    elif "0.021" in name:
+        return 3
+    else:
+        # 未识别等级（可用于调试或后续过滤）
+        return -1
+
+
+# ---------------------------------------------------------
 # 从父目录名解析负载
 # ---------------------------------------------------------
 def parse_load(dirpath):
@@ -70,9 +96,13 @@ def load_dataset(root_dir):
             label = parse_label(filename)
             load_value = parse_load(dirpath)
 
+            # === [NEW] 故障等级
+            severity = parse_severity(filename)
+
             dataset.append({
                 "signal": signal,
                 "label": label,
+                "severity": severity,   # === [NEW]
                 "filename": filename,
                 "load": load_value
             })
@@ -85,7 +115,6 @@ def load_dataset(root_dir):
 # 测试 load_dataset.py
 # ---------------------------------------------------------
 if __name__ == "__main__":
-    #实际路径
     data = load_dataset("data/CWRU")
 
     print("Example item:")

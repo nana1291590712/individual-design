@@ -3,26 +3,17 @@ import torch
 from model import MultiScale1DCNN
 
 
-# ------------------------------
-# 创建模型
-# ------------------------------
-model = MultiScale1DCNN(num_classes=4)
+if __name__ == "__main__":
 
-# ------------------------------
-# 构造一个虚拟输入
-# 输入尺寸必须是 [batch, 1, 1024]
-# ------------------------------
-dummy_input = torch.randn(8, 1, 1024)   # batch_size = 8
+    model = MultiScale1DCNN()
+    model.eval()
 
-# ------------------------------
-# 前向推理（不计算梯度）
-# ------------------------------
-with torch.no_grad():
-    output = model(dummy_input)
+    dummy_input = torch.randn(8, 1, 1024)
 
-# ------------------------------
-# 打印形状
-# ------------------------------
-print("输入 shape:", dummy_input.shape)
-print("输出 shape:", output.shape)
-print("模型参数量:", sum(p.numel() for p in model.parameters()))
+    with torch.no_grad():
+        fault_out, severity_out = model(dummy_input)
+
+    print("Input shape      :", dummy_input.shape)
+    print("Fault output     :", fault_out.shape)
+    print("Severity output  :", severity_out.shape)
+    print("Total parameters :", sum(p.numel() for p in model.parameters()))

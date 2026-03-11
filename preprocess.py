@@ -1,88 +1,119 @@
 # preprocess.py
 import numpy as np
 
+
 # -------------------------------
-# 信号归一化
+# Signal normalization
 # -------------------------------
 def normalize_signal(signal):
     """
-    对信号进行标准化
-    x_norm = (x - μ) / σ
+    Standardize signal:
+    x_norm = (x - mean) / std
     """
     return (signal - np.mean(signal)) / np.std(signal)
 
+
 # -------------------------------
-# 滑动窗口切片
+# Sliding window segmentation
 # -------------------------------
 def sliding_window(signal, window_size=1024, step=512):
     """
-    将长信号切片为多个固定长度窗口
+    Segment long signal into fixed-length windows
     """
     window_size = int(window_size)
     step = int(step)
-    slices = []
 
+    slices = []
     for start in range(0, len(signal) - window_size + 1, step):
-        slice_ = signal[start:start + window_size]
-        slices.append(slice_)
+        slices.append(signal[start:start + window_size])
 
     return np.array(slices)
 
+
 # -------------------------------
-# 标签编码
+# Fault label encoding
 # -------------------------------
-label_map = {"Normal": 0, "Ball": 1, "Inner": 2, "Outer": 3}
+label_map = {
+    "Normal": 0,
+    "Ball": 1,
+    "Inner": 2,
+    "Outer": 3
+}
+
 
 def encode_label(label_str):
-    """
-    将标签字符串映射为整数；若标签不在映射表中则报错
-    """
     if label_str not in label_map:
-        raise ValueError(f"Unknown label: {label_str}")
+        raise ValueError(f"Unknown fault label: {label_str}")
     return label_map[label_str]
 
 
 # -------------------------------
-# 处理整个数据集
+# Dataset preprocessing (severity framework)
 # -------------------------------
 def preprocess_dataset(input_dataset, window_size=1024, step=512):
     """
-    对整个数据集进行归一化 + 滑窗切片 + 标签编码
-    返回：
-        x_array: shape (num_slices, window_size)
-        y_array: shape (num_slices,)
-        loads_array: shape (num_slices,)
+    Preprocess dataset with fault–severity framework
+
+    Returns:
+        x_array        : (N, window_size)
+        y_fault_array  : (N,)
+        y_sev_array    : (N,)
+        loads_array    : (N,)
     """
+
     x_slices = []
-    y_labels = []
+    y_fault_labels = []
+    y_sev_labels = []
     load_values = []
 
     for item in input_dataset:
-        signal = normalize_signal(item['signal'])
+
+        signal = normalize_signal(item["signal"])
         slices = sliding_window(signal, window_size, step)
-        label_encoded = encode_label(item['label'])
-        load = int(item.get('load', 0))  # load 信息，如果没有则默认 0
+
+        fault_label = encode_label(item["label"])
+        raw_severity = int(item.get("severity", -1))
+        load = int(item.get("load", 0))
+
+        if fault_label == 0 or raw_severity == -1:
+            severity = 0
+        else:
+            severity = raw_severity - 1
+
+        if severity not in (0, 1, 2):
+            raise ValueError(
+                f"Invalid severity value after mapping: {severity} "
+                f"(raw_severity={raw_severity})"
+            )
 
         x_slices.append(slices)
-        y_labels.extend([label_encoded]*len(slices))
-        load_values.extend([load]*len(slices))
+        y_fault_labels.extend([fault_label] * len(slices))
+        y_sev_labels.extend([severity] * len(slices))
+        load_values.extend([load] * len(slices))
 
     x_array = np.vstack(x_slices)
-    y_array = np.array(y_labels, dtype=int)
+    y_fault_array = np.array(y_fault_labels, dtype=int)
+    y_sev_array = np.array(y_sev_labels, dtype=int)
     loads_array = np.array(load_values, dtype=int)
 
-    return x_array, y_array, loads_array
+    return x_array, y_fault_array, y_sev_array, loads_array
+
 
 # -------------------------------
-# 测试 preprocess.py
+# Self-test
 # -------------------------------
 if __name__ == "__main__":
     from load_dataset import load_dataset
+
     root = r"D:\design\data\CWRU\12kDriveEndFault"
     dataset = load_dataset(root)
 
-    x_array, y_array, loads_array = preprocess_dataset(dataset)
-    print("X shape:", x_array.shape)
-    print("y shape:", y_array.shape)
-    print("loads shape:", loads_array.shape)
-    print("Example labels:", y_array[:10])
+    x, y_fault, y_sev, loads = preprocess_dataset(dataset)
+
+    print("X shape:", x.shape)
+    print("Fault labels shape:", y_fault.shape)
+    print("Severity labels shape:", y_sev.shape)
+    print("Loads shape:", loads.shape)
+
+    print("Fault unique:", np.unique(y_fault))
+    print("Severity unique:", np.unique(y_sev))
