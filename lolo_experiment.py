@@ -104,7 +104,7 @@ def eval_local(model, loader, criterion, return_preds=False):
 # 通用训练 + 测试（fault-only）
 # =====================================================
 def train_and_test(model_class, train_data, val_data, test_data,
-                   lr=1e-3, epochs=20):
+                   lr=1e-3, epochs=40):
 
     x_train, y_train = train_data
     x_val,   y_val   = val_data

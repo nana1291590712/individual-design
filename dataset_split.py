@@ -6,15 +6,15 @@ from load_dataset import load_dataset
 
 
 # =====================================================================
-# 方案 1：固定测试负载（3HP）——分级框架版本
+# 方案 1：固定测试负载（3HP）——severity regression 版本
 # =====================================================================
 def split_dataset(input_dataset, window_size=1024, step=512):
     """
-    分级跨负载划分（非 LOLO）：
+    跨负载划分（非 LOLO）：
         - 训练/验证：0HP, 1HP, 2HP
         - 测试：      3HP（unseen load）
         - Train/Val = 80/20
-        - Stratify = (fault, severity)
+        - Stratify = fault only
     """
 
     # -------------------------------------------------
@@ -38,12 +38,9 @@ def split_dataset(input_dataset, window_size=1024, step=512):
     y_sev_test = y_severity_all[test_idx]
 
     # -------------------------------------------------
-    # 3. 分级 stratify（fault + severity）
+    # 3. Train / Val 划分
+    # severity 已改为连续值，因此只按 fault 分层
     # -------------------------------------------------
-    stratify_labels = np.array(
-        [f"{f}_{s}" for f, s in zip(y_fault_train_val, y_sev_train_val)]
-    )
-
     x_train, x_val, \
     y_fault_train, y_fault_val, \
     y_sev_train, y_sev_val = train_test_split(
@@ -52,7 +49,7 @@ def split_dataset(input_dataset, window_size=1024, step=512):
         y_sev_train_val,
         test_size=0.2,
         random_state=42,
-        stratify=stratify_labels
+        stratify=y_fault_train_val
     )
 
     return (
@@ -63,15 +60,15 @@ def split_dataset(input_dataset, window_size=1024, step=512):
 
 
 # =====================================================================
-# 方案 2：LOLO（Leave-One-Load-Out）——分级框架版本
+# 方案 2：LOLO（Leave-One-Load-Out）——severity regression 版本
 # =====================================================================
 def split_dataset_by_leave_one_load(raw_dataset, leave_out_load,
                                     window_size=1024, step=512):
     """
-    LOLO + 分级约束：
+    LOLO:
         - leave_out_load 作为完全未见测试负载
         - 其余负载 → Train / Val
-        - Stratify = (fault, severity)
+        - Stratify = fault only
     """
 
     # -------------------------------------------------
@@ -95,12 +92,9 @@ def split_dataset_by_leave_one_load(raw_dataset, leave_out_load,
     y_sev_test = y_severity_all[test_mask]
 
     # -------------------------------------------------
-    # 3. 分级 stratify
+    # 3. Train / Val 划分
+    # severity 已改为连续值，因此只按 fault 分层
     # -------------------------------------------------
-    stratify_labels = np.array(
-        [f"{f}_{s}" for f, s in zip(y_fault_train_full, y_sev_train_full)]
-    )
-
     x_train, x_val, \
     y_fault_train, y_fault_val, \
     y_sev_train, y_sev_val = train_test_split(
@@ -109,7 +103,7 @@ def split_dataset_by_leave_one_load(raw_dataset, leave_out_load,
         y_sev_train_full,
         test_size=0.15,
         random_state=42,
-        stratify=stratify_labels
+        stratify=y_fault_train_full
     )
 
     train_loads = sorted(list(set(loads_all[train_mask])))
@@ -127,8 +121,12 @@ def split_dataset_by_leave_one_load(raw_dataset, leave_out_load,
 # 自测
 # =====================================================================
 if __name__ == "__main__":
-    root = r"D:\design\data\CWRU\12kDriveEndFault"
-    dataset = load_dataset(root)
+    fault_root = r"D:\design\data\CWRU\12kDriveEndFault"
+    normal_root = r"D:\design\data\CWRU\NormalBaseline"
+
+    fault_dataset = load_dataset(fault_root)
+    normal_dataset = load_dataset(normal_root)
+    dataset = fault_dataset + normal_dataset
 
     out = split_dataset(dataset)
     print("Normal split:")
@@ -136,8 +134,24 @@ if __name__ == "__main__":
     print("Val:  ", out[1].shape)
     print("Test: ", out[2].shape)
 
+    print("Train fault unique:", np.unique(out[3]))
+    print("Val fault unique:  ", np.unique(out[4]))
+    print("Test fault unique: ", np.unique(out[5]))
+
+    print("Train severity unique:", np.unique(out[6]))
+    print("Val severity unique:  ", np.unique(out[7]))
+    print("Test severity unique: ", np.unique(out[8]))
+
     lolo = split_dataset_by_leave_one_load(dataset, leave_out_load=3)
     print("\nLOLO leave 3HP:")
     print("Train:", lolo[0][0].shape)
     print("Val:  ", lolo[1][0].shape)
     print("Test: ", lolo[2][0].shape)
+
+    print("LOLO Train fault unique:", np.unique(lolo[0][1]))
+    print("LOLO Val fault unique:  ", np.unique(lolo[1][1]))
+    print("LOLO Test fault unique: ", np.unique(lolo[2][1]))
+
+    print("LOLO Train severity unique:", np.unique(lolo[0][2]))
+    print("LOLO Val severity unique:  ", np.unique(lolo[1][2]))
+    print("LOLO Test severity unique: ", np.unique(lolo[2][2]))

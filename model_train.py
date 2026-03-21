@@ -16,8 +16,11 @@ BATCH_SIZE = 64
 LR = 1e-3
 EPOCHS = 60
 
-# ✅ 建议提高一些（mask 后更安全）
-SEVERITY_LOSS_WEIGHT = 1.0
+# 关键：提高 severity 分支权重
+SEVERITY_LOSS_WEIGHT = 10.0
+
+# 关键：将直径归一化到 [0,1]
+MAX_DIAMETER = 0.028
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -28,8 +31,43 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def to_tensor(x, y_fault, y_severity):
     x = torch.tensor(x, dtype=torch.float32).unsqueeze(1)
     y_fault = torch.tensor(y_fault, dtype=torch.long)
-    y_severity = torch.tensor(y_severity, dtype=torch.long)
+
+    # severity 归一化到 [0,1]
+    y_severity = torch.tensor(y_severity / MAX_DIAMETER, dtype=torch.float32)
+
     return x, y_fault, y_severity
+
+
+# --------------------------------------------------------
+# 计算 interval accuracy
+# 输入和输出都应为归一化后的 [0,1] 直径
+# --------------------------------------------------------
+def normalized_diameter_to_class(d):
+    d = float(d)
+
+    # 原始中点阈值：0.0105, 0.0175, 0.0245
+    # 归一化后：
+    # 0.0105 / 0.028 = 0.375
+    # 0.0175 / 0.028 = 0.625
+    # 0.0245 / 0.028 = 0.875
+    if d < 0.375:
+        return 0
+    elif d < 0.625:
+        return 1
+    elif d < 0.875:
+        return 2
+    else:
+        return 3
+
+
+def compute_interval_accuracy(pred, target):
+    pred = pred.detach().cpu().numpy()
+    target = target.detach().cpu().numpy()
+
+    pred_cls = np.array([normalized_diameter_to_class(p) for p in pred])
+    true_cls = np.array([normalized_diameter_to_class(t) for t in target])
+
+    return (pred_cls == true_cls).mean()
 
 
 # --------------------------------------------------------
@@ -42,6 +80,10 @@ def train_one_epoch(model, loader, criterion_fault, criterion_severity, optimize
     correct_fault = 0
     total_fault = 0
 
+    total_severity_abs_error = 0.0
+    total_interval_correct = 0
+    total_samples = 0
+
     for batch_x, batch_fault, batch_severity in loader:
         batch_x = batch_x.to(device)
         batch_fault = batch_fault.to(device)
@@ -51,14 +93,11 @@ def train_one_epoch(model, loader, criterion_fault, criterion_severity, optimize
 
         fault_out, severity_out = model(batch_x)
 
-        loss_fault = criterion_fault(fault_out, batch_fault)
+        # 裁剪到 [0,1]，避免回归值明显越界
+        severity_out = torch.clamp(severity_out, min=0.0, max=1.0)
 
-        # ✅ severity 只对 severity!=-1 的样本计算
-        mask = (batch_severity != -1)
-        if mask.any():
-            loss_severity = criterion_severity(severity_out[mask], batch_severity[mask])
-        else:
-            loss_severity = torch.tensor(0.0, device=device)
+        loss_fault = criterion_fault(fault_out, batch_fault)
+        loss_severity = criterion_severity(severity_out, batch_severity)
 
         loss = loss_fault + SEVERITY_LOSS_WEIGHT * loss_severity
         loss.backward()
@@ -71,11 +110,30 @@ def train_one_epoch(model, loader, criterion_fault, criterion_severity, optimize
         correct_fault += preds.eq(batch_fault).sum().item()
         total_fault += batch_fault.size(0)
 
-    return total_loss / total_fault, correct_fault / total_fault
+        # severity MAE
+        total_severity_abs_error += torch.abs(severity_out - batch_severity).sum().item()
+
+        # severity interval acc
+        pred_cls = torch.tensor(
+            [normalized_diameter_to_class(v) for v in severity_out.detach().cpu().numpy()]
+        )
+        true_cls = torch.tensor(
+            [normalized_diameter_to_class(v) for v in batch_severity.detach().cpu().numpy()]
+        )
+        total_interval_correct += (pred_cls == true_cls).sum().item()
+
+        total_samples += batch_x.size(0)
+
+    avg_loss = total_loss / total_fault
+    fault_acc = correct_fault / total_fault
+    severity_mae = total_severity_abs_error / total_samples
+    severity_interval_acc = total_interval_correct / total_samples
+
+    return avg_loss, fault_acc, severity_mae, severity_interval_acc
 
 
 # --------------------------------------------------------
-# 验证
+# 验证 / 测试
 # --------------------------------------------------------
 def evaluate(model, loader, criterion_fault, criterion_severity):
     model.eval()
@@ -83,6 +141,11 @@ def evaluate(model, loader, criterion_fault, criterion_severity):
 
     correct_fault = 0
     total_fault = 0
+
+    total_severity_abs_error = 0.0
+    total_severity_sq_error = 0.0
+    total_interval_correct = 0
+    total_samples = 0
 
     with torch.no_grad():
         for batch_x, batch_fault, batch_severity in loader:
@@ -92,22 +155,41 @@ def evaluate(model, loader, criterion_fault, criterion_severity):
 
             fault_out, severity_out = model(batch_x)
 
-            loss_fault = criterion_fault(fault_out, batch_fault)
+            severity_out = torch.clamp(severity_out, min=0.0, max=1.0)
 
-            mask = (batch_severity != -1)
-            if mask.any():
-                loss_severity = criterion_severity(severity_out[mask], batch_severity[mask])
-            else:
-                loss_severity = torch.tensor(0.0, device=device)
+            loss_fault = criterion_fault(fault_out, batch_fault)
+            loss_severity = criterion_severity(severity_out, batch_severity)
 
             loss = loss_fault + SEVERITY_LOSS_WEIGHT * loss_severity
             total_loss += loss.item() * batch_x.size(0)
 
+            # fault accuracy
             _, preds = fault_out.max(1)
             correct_fault += preds.eq(batch_fault).sum().item()
             total_fault += batch_fault.size(0)
 
-    return total_loss / total_fault, correct_fault / total_fault
+            # severity errors
+            diff = severity_out - batch_severity
+            total_severity_abs_error += torch.abs(diff).sum().item()
+            total_severity_sq_error += (diff ** 2).sum().item()
+
+            pred_cls = torch.tensor(
+                [normalized_diameter_to_class(v) for v in severity_out.detach().cpu().numpy()]
+            )
+            true_cls = torch.tensor(
+                [normalized_diameter_to_class(v) for v in batch_severity.detach().cpu().numpy()]
+            )
+            total_interval_correct += (pred_cls == true_cls).sum().item()
+
+            total_samples += batch_x.size(0)
+
+    avg_loss = total_loss / total_fault
+    fault_acc = correct_fault / total_fault
+    severity_mae = total_severity_abs_error / total_samples
+    severity_rmse = np.sqrt(total_severity_sq_error / total_samples)
+    severity_interval_acc = total_interval_correct / total_samples
+
+    return avg_loss, fault_acc, severity_mae, severity_rmse, severity_interval_acc
 
 
 # --------------------------------------------------------
@@ -115,7 +197,14 @@ def evaluate(model, loader, criterion_fault, criterion_severity):
 # --------------------------------------------------------
 def main():
     print("Loading raw CWRU dataset...")
-    data = load_dataset("data/CWRU")
+
+    fault_root = r"D:\design\data\CWRU\12kDriveEndFault"
+    normal_root = r"D:\design\data\CWRU\NormalBaseline"
+
+    fault_dataset = load_dataset(fault_root)
+    normal_dataset = load_dataset(normal_root)
+    data = fault_dataset + normal_dataset
+
     print("Loaded items:", len(data))
     print("Example item:", data[0])
 
@@ -125,20 +214,9 @@ def main():
     y_fault_train, y_fault_val, y_fault_test, \
     y_sev_train, y_sev_val, y_sev_test = split_dataset(input_dataset=data)
 
-    # ----------------------------------------------------
-    # ✅ 统计 severity 类别分布（只统计故障 severity: 0/1/2）
-    # ----------------------------------------------------
-    sev_train_valid = y_sev_train[y_sev_train != -1]
-    if len(sev_train_valid) == 0:
-        raise RuntimeError("No valid severity labels found in training set (all -1).")
-
-    counts = np.bincount(sev_train_valid, minlength=3)  # [low, med, high]
-    print("Train severity counts (fault-only):", counts.tolist())
-
-    weights = 1.0 / (counts + 1e-6)
-    weights = weights / weights.mean()  # normalize around 1
-    sev_weights = torch.tensor(weights, dtype=torch.float32).to(device)
-    print("Severity class weights:", weights.tolist())
+    print("Train severity range:", float(np.min(y_sev_train)), "to", float(np.max(y_sev_train)))
+    print("Val severity range:", float(np.min(y_sev_val)), "to", float(np.max(y_sev_val)))
+    print("Test severity range:", float(np.min(y_sev_test)), "to", float(np.max(y_sev_test)))
 
     # ----------------------------------------------------
     # numpy → tensor
@@ -165,12 +243,7 @@ def main():
     model = MultiScale1DCNN().to(device)
 
     criterion_fault = nn.CrossEntropyLoss()
-
-    # ✅ ignore_index=-1 + class weights
-    criterion_severity = nn.CrossEntropyLoss(
-        weight=sev_weights,
-        ignore_index=-1
-    )
+    criterion_severity = nn.SmoothL1Loss()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
@@ -179,41 +252,57 @@ def main():
     )
 
     print("Start training improved MultiScale1DCNN...")
-    best_val_acc = 0.0
+
+    # 不再只按 fault acc 保存
+    best_score = -1.0
 
     for epoch in range(EPOCHS):
-        train_loss, train_acc = train_one_epoch(
+        train_loss, train_acc, train_sev_mae, train_sev_interval_acc = train_one_epoch(
             model, train_loader,
             criterion_fault, criterion_severity,
             optimizer
         )
 
-        val_loss, val_acc = evaluate(
+        val_loss, val_acc, val_sev_mae, val_sev_rmse, val_sev_interval_acc = evaluate(
             model, val_loader,
             criterion_fault, criterion_severity
         )
 
         scheduler.step(val_loss)
 
-        print(f"Epoch [{epoch+1}/{EPOCHS}] | "
-              f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc*100:.2f}% | "
-              f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc*100:.2f}%")
+        print(
+            f"Epoch [{epoch+1}/{EPOCHS}] | "
+            f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc*100:.2f}%, "
+            f"Train Sev MAE: {train_sev_mae:.6f}, Train Sev Interval Acc: {train_sev_interval_acc*100:.2f}% | "
+            f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc*100:.2f}%, "
+            f"Val Sev MAE: {val_sev_mae:.6f}, Val Sev RMSE: {val_sev_rmse:.6f}, "
+            f"Val Sev Interval Acc: {val_sev_interval_acc*100:.2f}%"
+        )
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        # 关键：以 severity interval acc 为主保存模型
+        score = val_sev_interval_acc
+        if score > best_score:
+            best_score = score
             torch.save(model.state_dict(), "multiscale_best.pth")
 
     print("Training finished.")
-    print(f"Best Validation Accuracy: {best_val_acc*100:.2f}%")
+    print(f"Best Validation Severity Interval Accuracy: {best_score*100:.2f}%")
 
     print("Evaluating on test set...")
     model.load_state_dict(torch.load("multiscale_best.pth", map_location=device))
-    test_loss, test_acc = evaluate(
+
+    test_loss, test_acc, test_sev_mae, test_sev_rmse, test_sev_interval_acc = evaluate(
         model, test_loader,
         criterion_fault, criterion_severity
     )
 
-    print(f"Test Accuracy: {test_acc*100:.2f}%")
+    print(
+        f"Test Loss: {test_loss:.4f} | "
+        f"Test Acc: {test_acc*100:.2f}% | "
+        f"Test Sev MAE: {test_sev_mae:.6f} | "
+        f"Test Sev RMSE: {test_sev_rmse:.6f} | "
+        f"Test Sev Interval Acc: {test_sev_interval_acc*100:.2f}%"
+    )
 
 
 if __name__ == "__main__":

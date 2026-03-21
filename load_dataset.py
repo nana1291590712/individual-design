@@ -1,6 +1,6 @@
-# load_dataset.py
 import os
 import scipy.io as sio
+
 
 # ---------------------------------------------------------
 # 从 .mat 文件读取 DE_time 信号
@@ -18,6 +18,9 @@ def load_mat_file(path):
 
 # ---------------------------------------------------------
 # 从文件名解析故障类型
+# 说明：
+# 当前仍优先按文件名关键词判断；
+# 若文件名不包含关键词，则返回 "Unknown"，后续通过调试输出检查。
 # ---------------------------------------------------------
 def parse_label(filename):
     name = filename.lower()
@@ -35,15 +38,17 @@ def parse_label(filename):
 
 
 # ---------------------------------------------------------
-# === [NEW] 从文件名解析故障等级（Severity / Level）
+# 从文件名解析故障等级（Severity / defect diameter index）
 # ---------------------------------------------------------
 def parse_severity(filename):
     """
-    故障分级规则（基于 CWRU 常见命名）：
-        Normal           -> level 0
-        0.007 inch fault -> level 1 (Mild)
-        0.014 inch fault -> level 2 (Moderate)
-        0.021 inch fault -> level 3 (Severe)
+    Severity index mapping:
+        Normal           -> 0
+        0.007 inch fault -> 1
+        0.014 inch fault -> 2
+        0.021 inch fault -> 3
+        0.028 inch fault -> 4
+        Unknown          -> -1
     """
     name = filename.lower()
 
@@ -55,8 +60,9 @@ def parse_severity(filename):
         return 2
     elif "0.021" in name:
         return 3
+    elif "0.028" in name:
+        return 4
     else:
-        # 未识别等级（可用于调试或后续过滤）
         return -1
 
 
@@ -82,6 +88,9 @@ def parse_load(dirpath):
 def load_dataset(root_dir):
     dataset = []
 
+    unknown_label_files = []
+    unknown_severity_files = []
+
     for dirpath, _, filenames in os.walk(root_dir):
         for filename in filenames:
             if not filename.endswith(".mat"):
@@ -94,20 +103,53 @@ def load_dataset(root_dir):
                 continue
 
             label = parse_label(filename)
+            severity = parse_severity(filename)
             load_value = parse_load(dirpath)
 
-            # === [NEW] 故障等级
-            severity = parse_severity(filename)
+            if label == "Unknown":
+                unknown_label_files.append(full_path)
+
+            if severity == -1:
+                unknown_severity_files.append(full_path)
 
             dataset.append({
                 "signal": signal,
                 "label": label,
-                "severity": severity,   # === [NEW]
+                "severity": severity,
                 "filename": filename,
                 "load": load_value
             })
 
     print(f"Loaded files: {len(dataset)}")
+
+    # 调试输出
+    label_count = {}
+    severity_count = {}
+    load_count = {}
+
+    for item in dataset:
+        label_count[item["label"]] = label_count.get(item["label"], 0) + 1
+        severity_count[item["severity"]] = severity_count.get(item["severity"], 0) + 1
+        load_count[item["load"]] = load_count.get(item["load"], 0) + 1
+
+    print("Label count:", label_count)
+    print("Severity count:", severity_count)
+    print("Load count:", load_count)
+
+    if len(unknown_label_files) > 0:
+        print("\n[Warning] Files with Unknown label:")
+        for p in unknown_label_files[:20]:
+            print(p)
+        if len(unknown_label_files) > 20:
+            print(f"... and {len(unknown_label_files) - 20} more")
+
+    if len(unknown_severity_files) > 0:
+        print("\n[Warning] Files with Unknown severity:")
+        for p in unknown_severity_files[:20]:
+            print(p)
+        if len(unknown_severity_files) > 20:
+            print(f"... and {len(unknown_severity_files) - 20} more")
+
     return dataset
 
 
@@ -117,6 +159,6 @@ def load_dataset(root_dir):
 if __name__ == "__main__":
     data = load_dataset("data/CWRU")
 
-    print("Example item:")
+    print("\nExample item:")
     if len(data) > 0:
         print(data[0])

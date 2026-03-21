@@ -4,21 +4,20 @@ import torch.nn as nn
 
 
 # =========================================================
-# 改进模型：Multi-Scale 1D-CNN + 分级框架（Multi-Task）
+# 改进模型：Multi-Scale 1D-CNN + 多任务框架（Multi-Task）
 # 主任务：故障类型识别（Fault Classification）
-# 辅任务：危险等级预测（Severity Grading）
+# 辅任务：故障直径回归（Severity Regression）
 #
 # 输入：  [B, 1, 1024]
 # 输出：
-#   - fault_logits:    [B, num_fault_classes]
-#   - severity_logits: [B, num_severity_classes]
+#   - fault_logits: [B, num_fault_classes]
+#   - severity_pred: [B]
 # =========================================================
 class MultiScale1DCNN(nn.Module):
 
     def __init__(
         self,
         num_fault_classes: int = 4,
-        num_severity_classes: int = 3,   # === NEW === 危险等级数量
         input_channels: int = 1,
         branch_out_channels: int = 32
     ):
@@ -92,7 +91,9 @@ class MultiScale1DCNN(nn.Module):
         # 多任务输出头（Heads）
         # -------------------------------------------------
         self.fault_head = nn.Linear(16, num_fault_classes)
-        self.severity_head = nn.Linear(16, num_severity_classes)  # === NEW ===
+
+        # severity 回归头：输出连续故障直径
+        self.severity_head = nn.Linear(16, 1)
 
     def forward(self, x):
         # x: [B, 1, 1024]
@@ -114,6 +115,19 @@ class MultiScale1DCNN(nn.Module):
 
         # ---------- Multi-task outputs ----------
         fault_logits = self.fault_head(x)
-        severity_logits = self.severity_head(x)
+        severity_pred = self.severity_head(x).squeeze(-1)  # [B]
 
-        return fault_logits, severity_logits
+        return fault_logits, severity_pred
+
+
+# =========================================================
+# Self-test
+# =========================================================
+if __name__ == "__main__":
+    model = MultiScale1DCNN()
+    x = torch.randn(8, 1, 1024)
+
+    fault_logits, severity_pred = model(x)
+
+    print("Fault logits shape:", fault_logits.shape)
+    print("Severity pred shape:", severity_pred.shape)
